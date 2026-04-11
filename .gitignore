@@ -1,0 +1,4 @@
+bin/
+Makefile.local
+*.ext4
+bin/websandbox
