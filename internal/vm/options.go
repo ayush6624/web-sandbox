@@ -1,13 +1,5 @@
 package vm
 
-import (
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/google/uuid"
-)
-
 // RunOptions configures a microVM run.
 type RunOptions struct {
 	FirecrackerBin string
@@ -31,21 +23,4 @@ type RunOptions struct {
 type RuntimeConfig struct {
 	SocketPath string
 	VMID       string
-}
-
-func (o *RunOptions) applyDefaults() error {
-	if o.FirecrackerBin == "" {
-		o.FirecrackerBin = "firecracker"
-	}
-	if o.SocketPath == "" {
-		id, err := uuid.NewRandom()
-		if err != nil {
-			return err
-		}
-		o.SocketPath = filepath.Join(os.TempDir(), fmt.Sprintf("websandbox-%s.sock", id.String()))
-	}
-	if o.LogDir == "" {
-		o.LogDir = os.TempDir()
-	}
-	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,23 @@ import (
 // Machine wraps the Firecracker SDK machine (Linux only).
 type Machine struct {
 	*fcsdk.Machine
+}
+
+func (o *RunOptions) applyDefaults() error {
+	if o.FirecrackerBin == "" {
+		o.FirecrackerBin = "firecracker"
+	}
+	if o.SocketPath == "" {
+		id, err := uuid.NewRandom()
+		if err != nil {
+			return err
+		}
+		o.SocketPath = filepath.Join(os.TempDir(), fmt.Sprintf("websandbox-%s.sock", id.String()))
+	}
+	if o.LogDir == "" {
+		o.LogDir = os.TempDir()
+	}
+	return nil
 }
 
 func (o RunOptions) fcConfig() (fcsdk.Config, error) {
@@ -63,7 +81,6 @@ func (o RunOptions) fcConfig() (fcsdk.Config, error) {
 		Seccomp:  fcsdk.SeccompConfig{Enabled: false},
 	}
 
-	// Configure networking if a tap device is specified.
 	if o.TapDevice != "" {
 		iface, err := buildNetworkInterface(o)
 		if err != nil {
@@ -126,11 +143,13 @@ func silentLog() *logrus.Entry {
 }
 
 // NewMachine builds a Machine from RunOptions.
-func NewMachine(ctx context.Context, opts RunOptions) (*Machine, RuntimeConfig, error) {
+// Pass disableValidation=true to skip SDK path validation (e.g. for dry runs).
+func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*Machine, RuntimeConfig, error) {
 	fcCfg, err := opts.fcConfig()
 	if err != nil {
 		return nil, RuntimeConfig{}, err
 	}
+	fcCfg.DisableValidation = disableValidation
 
 	cmd := buildCommand(ctx, fcCfg, opts.FirecrackerBin)
 	m, err := fcsdk.NewMachine(ctx, fcCfg, fcsdk.WithProcessRunner(cmd), fcsdk.WithLogger(silentLog()))
@@ -149,12 +168,20 @@ func Start(ctx context.Context, m *Machine) error {
 	return m.Machine.Start(ctx)
 }
 
-// StopForce sends SIGTERM to the Firecracker process.
+// StopForce sends SIGTERM to the Firecracker process (fast teardown).
 func StopForce(m *Machine) error {
 	if m == nil || m.Machine == nil {
 		return nil
 	}
 	return m.Machine.StopVMM()
+}
+
+// ShutdownGuest requests ACPI-style shutdown via CtrlAltDel.
+func ShutdownGuest(ctx context.Context, m *Machine) error {
+	if m == nil || m.Machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+	return m.Machine.Shutdown(ctx)
 }
 
 // Wait blocks until the Firecracker process exits.
@@ -163,4 +190,12 @@ func Wait(ctx context.Context, m *Machine) error {
 		return fmt.Errorf("nil machine")
 	}
 	return m.Machine.Wait(ctx)
+}
+
+// PID returns the Firecracker process PID.
+func PID(m *Machine) (int, error) {
+	if m == nil || m.Machine == nil {
+		return 0, fmt.Errorf("nil machine")
+	}
+	return m.Machine.PID()
 }

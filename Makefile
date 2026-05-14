@@ -43,7 +43,7 @@ remote-shell: check-remote
 	ssh $(REMOTE)
 
 remote-doctor: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && ./bin/websandbox doctor'
+	$(REMOTE_BASE) '$(REMOTE_CD) && ./websandbox doctor --config configs/devbox.json'
 
 # --- One-time setup ---
 
@@ -58,7 +58,7 @@ remote-setup-devbox: sync
 # --- VM lifecycle ---
 
 remote-up: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./bin/websandbox up --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox up --config configs/devbox.json'
 
 remote-down: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./bin/websandbox down --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox down --config configs/devbox.json'

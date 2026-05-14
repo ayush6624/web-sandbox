@@ -9,16 +9,16 @@ import (
 
 // Shared persistent flags across commands that need a config file.
 var (
-	cfgPath string
-	fcBin   string
-	kernel  string
-	rootfs  string
-	socket  string
-	vcpus   int64
-	memMIB  int64
+	cfgPath    string
+	fcBin      string
+	kernel     string
+	rootfs     string
+	socket     string
+	vcpus      int64
+	memMIB     int64
+	noValidate bool
 )
 
-// addVMFlags registers the shared flags for commands that create a VM.
 func addVMFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&cfgPath, "config", "", "path to JSON config (required)")
 	_ = cmd.MarkFlagRequired("config")
@@ -28,9 +28,9 @@ func addVMFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&socket, "socket", "", "override API socket path")
 	cmd.Flags().Int64Var(&vcpus, "vcpus", 0, "override vCPU count")
 	cmd.Flags().Int64Var(&memMIB, "mem-mib", 0, "override memory (MiB)")
+	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip SDK path validation (for dry runs on non-Linux)")
 }
 
-// loadAndMerge loads the config file and merges CLI flag overrides.
 func loadAndMerge() (*config.Config, vm.RunOptions, error) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -45,7 +45,6 @@ func loadAndMerge() (*config.Config, vm.RunOptions, error) {
 		MemMIB:         cfg.MemMIB,
 		SocketPath:     cfg.SocketPath,
 
-		// Networking
 		TapDevice:   cfg.TapDevice,
 		MacAddress:  cfg.MacAddress,
 		GuestCIDR:   cfg.GuestCIDR,

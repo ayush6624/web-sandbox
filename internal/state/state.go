@@ -8,6 +8,7 @@ import (
 
 // VMState persists information about a running VM so it can be stopped later.
 type VMState struct {
+	PID        int    `json:"pid"`
 	SocketPath string `json:"socket_path"`
 	VMID       string `json:"vmid"`
 }
