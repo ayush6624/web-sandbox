@@ -10,7 +10,7 @@ REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)
 REMOTE_BASE := ssh -o BatchMode=yes $(REMOTE)
 REMOTE_CD   := cd /home/$(REMOTE_USER)/$(REMOTE_DIR)
 
-.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-serve remote-up remote-down remote-list remote-doctor
+.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor
 
 build:
 	go build ./...
@@ -18,6 +18,7 @@ build:
 build-linux:
 	mkdir -p bin
 	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/websandbox ./cmd/websandbox
+	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandboxd ./cmd/sandboxd
 
 check-remote:
 	@test -n "$(REMOTE_HOST)" || (echo "set REMOTE_HOST"; exit 1)
@@ -27,6 +28,7 @@ check-remote:
 sync: check-remote build-linux
 	rsync -avz -e ssh \
 		bin/websandbox \
+		bin/sandboxd \
 		Makefile \
 		configs \
 		scripts \
@@ -54,6 +56,10 @@ remote-setup: sync
 remote-setup-devbox: sync
 	$(REMOTE_BASE) '$(REMOTE_CD) && sudo bash scripts/build-devbox-rootfs.sh'
 	$(REMOTE_BASE) '$(REMOTE_CD) && sudo bash scripts/setup-network.sh'
+
+# Install/update the sandboxd guest agent inside the base rootfs.
+remote-install-agent: sync
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox install-agent --agent ./sandboxd'
 
 # --- Server + sandbox lifecycle ---
 

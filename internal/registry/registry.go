@@ -185,6 +185,27 @@ func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
 	return scanSandbox(row)
 }
 
+// All returns every row regardless of status (most recent first).
+// Used by startup reconciliation to find stale state from a previous server run.
+func (r *Registry) All(ctx context.Context) ([]Sandbox, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at
+		 FROM sandboxes ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Sandbox
+	for rows.Next() {
+		sb, err := scanSandbox(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sb)
+	}
+	return out, rows.Err()
+}
+
 // List returns all running sandboxes (most recent first).
 func (r *Registry) List(ctx context.Context) ([]Sandbox, error) {
 	rows, err := r.db.QueryContext(ctx,

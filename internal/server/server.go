@@ -45,6 +45,8 @@ func New(cfg Config, reg *registry.Registry) *Server {
 func (s *Server) Serve(ctx context.Context) error {
 	s.vmCtx = ctx
 
+	s.reconcile(ctx)
+
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o755); err != nil {
 		return err
 	}
@@ -61,6 +63,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes", s.handleList)
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)
 	mux.HandleFunc("DELETE /sandboxes/{id}", s.handleDestroy)
+	mux.HandleFunc("POST /sandboxes/{id}/exec", s.handleAgentProxy("exec"))
+	mux.HandleFunc("GET /sandboxes/{id}/files", s.handleAgentProxy("files"))
+	mux.HandleFunc("PUT /sandboxes/{id}/files", s.handleAgentProxy("files"))
+	mux.HandleFunc("GET /sandboxes/{id}/dir", s.handleAgentProxy("dir"))
 
 	httpSrv := &http.Server{Handler: mux}
 
@@ -172,6 +178,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		err := vm.Wait(context.Background(), m)
 		fmt.Fprintf(os.Stderr, "[%s] VM exited: %v\n", id, err)
 	}(id)
+
+	// Block until the in-guest agent answers, so callers can exec/write files
+	// the moment create returns. Tear the sandbox down if it never comes up.
+	if err := waitForAgent(ctx, sb.GuestIP, 60*time.Second); err != nil {
+		_ = s.destroy(context.Background(), id)
+		httpError(w, 500, fmt.Errorf("sandbox booted but agent never became ready: %w", err))
+		return
+	}
 
 	sb.PID = pid
 	sb.VMID = rt.VMID

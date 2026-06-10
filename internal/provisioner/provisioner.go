@@ -2,17 +2,20 @@ package provisioner
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Network describes the host-side bridge and the guest-side application port
 // that gets forwarded.
 type Network struct {
-	Bridge    string // e.g. "br-fc" — tap devices attach here
-	GuestPort int    // e.g. 5173 — port the in-guest app listens on
+	Bridge      string // e.g. "br-fc" — tap devices attach here
+	GatewayCIDR string // e.g. "172.16.0.1/24" — bridge address; subnet derived from it
+	GuestPort   int    // e.g. 5173 — port the in-guest app listens on
 }
 
 // Provisioner performs host-side setup/teardown for sandboxes:
@@ -21,6 +24,86 @@ type Provisioner struct {
 	Network    Network
 	RootfsBase string // path to immutable base rootfs (e.g. /opt/fc/devbox-rootfs.ext4)
 	RootfsDir  string // directory to hold per-sandbox copies
+}
+
+// EnsureNetwork idempotently brings up the host networking the sandboxes need:
+// the bridge with its gateway IP, IP-forwarding sysctls, and NAT/FORWARD rules.
+// Bridges and iptables rules don't survive a reboot, so the server calls this
+// on every startup instead of relying on a one-time setup script.
+func (p *Provisioner) EnsureNetwork() error {
+	_, subnet, err := net.ParseCIDR(p.Network.GatewayCIDR)
+	if err != nil {
+		return fmt.Errorf("parse gateway CIDR %q: %w", p.Network.GatewayCIDR, err)
+	}
+
+	if _, err := os.Stat("/sys/class/net/" + p.Network.Bridge); err != nil {
+		if out, err := exec.Command("ip", "link", "add", "name", p.Network.Bridge, "type", "bridge").CombinedOutput(); err != nil {
+			return fmt.Errorf("create bridge %s: %w: %s", p.Network.Bridge, err, out)
+		}
+	}
+	setup := [][]string{
+		{"ip", "addr", "replace", p.Network.GatewayCIDR, "dev", p.Network.Bridge},
+		{"ip", "link", "set", p.Network.Bridge, "up"},
+		{"sysctl", "-w", "net.ipv4.ip_forward=1"},
+		{"sysctl", "-w", "net.ipv4.conf.all.route_localnet=1"},
+	}
+	for _, args := range setup {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %w: %s", args, err, out)
+		}
+	}
+
+	hostIface, err := defaultInterface()
+	if err != nil {
+		return err
+	}
+	rules := [][]string{
+		{"-t", "nat", "POSTROUTING", "-s", subnet.String(), "-o", hostIface, "-j", "MASQUERADE"},
+		{"-t", "nat", "POSTROUTING", "-o", p.Network.Bridge, "-j", "MASQUERADE"},
+		{"FORWARD", "-i", p.Network.Bridge, "-o", hostIface, "-j", "ACCEPT"},
+		{"FORWARD", "-i", hostIface, "-o", p.Network.Bridge, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+		{"FORWARD", "-i", p.Network.Bridge, "-o", p.Network.Bridge, "-j", "ACCEPT"},
+	}
+	for _, rule := range rules {
+		if err := ensureIptablesRule(rule); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureIptablesRule appends rule if an identical one isn't already present.
+// rule is the iptables arg list without the -C/-A verb, e.g.
+// ["-t","nat","POSTROUTING","-s",...] or ["FORWARD","-i",...].
+func ensureIptablesRule(rule []string) error {
+	verbAt := 0
+	if rule[0] == "-t" {
+		verbAt = 2
+	}
+	check := append(append(append([]string{}, rule[:verbAt]...), "-C", rule[verbAt]), rule[verbAt+1:]...)
+	if exec.Command("iptables", check...).Run() == nil {
+		return nil
+	}
+	add := append(append(append([]string{}, rule[:verbAt]...), "-A", rule[verbAt]), rule[verbAt+1:]...)
+	if out, err := exec.Command("iptables", add...).CombinedOutput(); err != nil {
+		return fmt.Errorf("iptables %v: %w: %s", add, err, out)
+	}
+	return nil
+}
+
+// defaultInterface returns the interface of the default route.
+func defaultInterface() (string, error) {
+	out, err := exec.Command("ip", "route", "show", "default").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ip route show default: %w: %s", err, out)
+	}
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "dev" && i+1 < len(fields) {
+			return fields[i+1], nil
+		}
+	}
+	return "", fmt.Errorf("no default route found in %q", string(out))
 }
 
 // PrepareRootfs copies the base rootfs to a per-sandbox path (sparse).

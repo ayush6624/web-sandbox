@@ -39,11 +39,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	prov := &provisioner.Provisioner{
 		Network: provisioner.Network{
-			Bridge:    cfg.Bridge,
-			GuestPort: cfg.GuestPort,
+			Bridge:      cfg.Bridge,
+			GatewayCIDR: cfg.GatewayIP + "/24",
+			GuestPort:   cfg.GuestPort,
 		},
 		RootfsBase: cfg.RootfsBase,
 		RootfsDir:  cfg.RootfsDir,
+	}
+
+	if err := prov.EnsureNetwork(); err != nil {
+		return fmt.Errorf("ensure network: %w", err)
 	}
 
 	tmpl := vm.RunOptions{
