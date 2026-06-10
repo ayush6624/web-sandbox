@@ -15,6 +15,11 @@ import (
 	"github.com/ayush6624/web-sandbox/internal/vm"
 )
 
+var (
+	listenAddr string
+	apiToken   string
+)
+
 func serveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -22,6 +27,8 @@ func serveCmd() *cobra.Command {
 		RunE:  runServe,
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "configs/devbox.json", "path to JSON config")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "also serve the API on this TCP address (requires --token); overrides config listen_addr")
+	cmd.Flags().StringVar(&apiToken, "token", "", "bearer token for the TCP listener; overrides config api_token")
 	return cmd
 }
 
@@ -29,6 +36,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
+	}
+	if listenAddr != "" {
+		cfg.ListenAddr = listenAddr
+	}
+	if apiToken != "" {
+		cfg.APIToken = apiToken
 	}
 
 	reg, err := registry.Open(cfg.DBPath, cfg.Pools)
@@ -62,6 +75,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	srv := server.New(server.Config{
 		SocketPath:  cfg.SocketPath,
+		ListenAddr:  cfg.ListenAddr,
+		APIToken:    cfg.APIToken,
 		Provisioner: prov,
 		GatewayIP:   cfg.GatewayIP,
 		VMTemplate:  tmpl,

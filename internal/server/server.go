@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,8 @@ import (
 // Config bundles everything the server needs at startup.
 type Config struct {
 	SocketPath  string
+	ListenAddr  string // optional TCP listener (e.g. tailnet IP:port); requires APIToken
+	APIToken    string // bearer token enforced on the TCP listener only
 	Provisioner *provisioner.Provisioner
 	GatewayIP   string         // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions  // base options (firecracker bin, kernel, args, vcpus, mem, dns)
@@ -40,8 +44,9 @@ func New(cfg Config, reg *registry.Registry) *Server {
 	return &Server{cfg: cfg, reg: reg}
 }
 
-// Serve listens on the configured Unix socket until ctx is cancelled.
-// On shutdown, all running sandboxes are torn down.
+// Serve listens on the configured Unix socket — and, if ListenAddr is set, on
+// TCP with bearer-token auth — until ctx is cancelled. On shutdown, all
+// running sandboxes are torn down.
 func (s *Server) Serve(ctx context.Context) error {
 	s.vmCtx = ctx
 
@@ -68,15 +73,30 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("PUT /sandboxes/{id}/files", s.handleAgentProxy("files"))
 	mux.HandleFunc("GET /sandboxes/{id}/dir", s.handleAgentProxy("dir"))
 
-	httpSrv := &http.Server{Handler: mux}
+	servers := []*http.Server{{Handler: mux}}
+	srvErr := make(chan error, 2)
+	go func() { srvErr <- servers[0].Serve(ln) }()
 
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- httpSrv.Serve(ln) }()
+	if s.cfg.ListenAddr != "" {
+		if s.cfg.APIToken == "" {
+			return errors.New("listen_addr is set but api_token is empty — refusing to serve TCP without auth")
+		}
+		tcpLn, err := net.Listen("tcp", s.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("listen tcp %s: %w", s.cfg.ListenAddr, err)
+		}
+		tcpSrv := &http.Server{Handler: bearerAuth(s.cfg.APIToken, mux)}
+		servers = append(servers, tcpSrv)
+		go func() { srvErr <- tcpSrv.Serve(tcpLn) }()
+		fmt.Fprintf(os.Stderr, "TCP API listening on %s (bearer auth)\n", s.cfg.ListenAddr)
+	}
 
 	select {
 	case <-ctx.Done():
 		shCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = httpSrv.Shutdown(shCtx)
+		for _, srv := range servers {
+			_ = srv.Shutdown(shCtx)
+		}
 		cancel()
 		s.shutdownAll()
 		return nil
@@ -86,6 +106,20 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+// bearerAuth rejects requests whose Authorization header doesn't carry token.
+// Applied only to the TCP listener — the Unix socket is protected by file mode.
+func bearerAuth(token string, next http.Handler) http.Handler {
+	want := sha256.Sum256([]byte("Bearer " + token))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
+			httpError(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // shutdownAll tears down every tracked sandbox on server stop.

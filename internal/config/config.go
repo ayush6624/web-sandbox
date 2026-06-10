@@ -13,6 +13,8 @@ import (
 type Config struct {
 	// --- API ---
 	SocketPath string `json:"socket_path"` // unix socket the server listens on (and the CLI dials)
+	ListenAddr string `json:"listen_addr"` // optional TCP listener, e.g. "100.99.183.74:8080" (tailnet); requires api_token
+	APIToken   string `json:"api_token"`   // bearer token required on the TCP listener
 
 	// --- Storage ---
 	DBPath     string `json:"db_path"`     // SQLite registry
