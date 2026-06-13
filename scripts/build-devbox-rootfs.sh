@@ -108,19 +108,31 @@ else
   echo ""
   echo "==> [5/6] Configuring system settings..."
 
-  # DNS — write a static resolv.conf (kernel ip= param doesn't always populate /etc/resolv.conf)
-  sudo tee "$BUILD_DIR/etc/resolv.conf" > /dev/null <<'DNS'
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-DNS
+  # DNS — the Firecracker SDK passes the config's nameservers
+  # (IPConfiguration.Nameservers, from configs/*.json) to the guest *only* via
+  # the kernel `ip=` boot param, which the guest kernel exposes at
+  # /proc/net/pnp in resolv.conf format. glibc reads /etc/resolv.conf and never
+  # /proc/net/pnp, so symlink the two. This honors whatever nameservers the
+  # config sets instead of hardcoding them. See firecracker-go-sdk network.go
+  # (IPConfiguration) and cni/vmconf (IPBootParam) for the contract.
+  sudo chroot "$BUILD_DIR" bash -c 'rm -f /etc/resolv.conf && ln -s /proc/net/pnp /etc/resolv.conf'
 
-  # Disable services that fight with kernel ip= boot param
+  # systemd-resolved/networkd would clobber that symlink and fight the kernel
+  # ip= config, so keep them masked.
   sudo chroot "$BUILD_DIR" bash -c '
     systemctl disable systemd-networkd.service 2>/dev/null || true
     systemctl disable systemd-resolved.service 2>/dev/null || true
     systemctl mask systemd-networkd.service 2>/dev/null || true
     systemctl mask systemd-resolved.service 2>/dev/null || true
   '
+
+  # Stable hostname + matching /etc/hosts so `sudo` and other tools that look
+  # up the local hostname don't warn "unable to resolve host".
+  echo "sandbox" | sudo tee "$BUILD_DIR/etc/hostname" > /dev/null
+  sudo tee "$BUILD_DIR/etc/hosts" > /dev/null <<'HOSTS'
+127.0.0.1   localhost sandbox
+::1         localhost ip6-localhost ip6-loopback
+HOSTS
 
   # Set root password for serial console debugging
   echo "root:devbox" | sudo chroot "$BUILD_DIR" chpasswd
