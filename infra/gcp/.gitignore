@@ -1,0 +1,3 @@
+# config.env holds project ID and the Tailscale auth key — never commit it.
+# Commit config.env.example (the sanitized template) instead.
+config.env
