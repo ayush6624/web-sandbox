@@ -17,8 +17,15 @@ func NewMachine(_ context.Context, _ RunOptions, _ bool) (*Machine, RuntimeConfi
 	return nil, RuntimeConfig{}, ErrLinuxOnly
 }
 
-func Start(_ context.Context, _ *Machine) error      { return ErrLinuxOnly }
-func StopForce(_ *Machine) error                     { return ErrLinuxOnly }
+func NewMachineFromSnapshot(_ context.Context, _ RunOptions, _, _ string, _ bool) (*Machine, RuntimeConfig, error) {
+	return nil, RuntimeConfig{}, ErrLinuxOnly
+}
+
+func Start(_ context.Context, _ *Machine) error         { return ErrLinuxOnly }
+func StopForce(_ *Machine) error                        { return ErrLinuxOnly }
 func ShutdownGuest(_ context.Context, _ *Machine) error { return ErrLinuxOnly }
-func Wait(_ context.Context, _ *Machine) error       { return ErrLinuxOnly }
-func PID(_ *Machine) (int, error)                    { return 0, ErrLinuxOnly }
+func Wait(_ context.Context, _ *Machine) error          { return ErrLinuxOnly }
+func PID(_ *Machine) (int, error)                       { return 0, ErrLinuxOnly }
+func Pause(_ context.Context, _ *Machine) error         { return ErrLinuxOnly }
+func Resume(_ context.Context, _ *Machine) error        { return ErrLinuxOnly }
+func Snapshot(_ context.Context, _ *Machine, _, _ string) error { return ErrLinuxOnly }

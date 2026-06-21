@@ -167,7 +167,38 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 	return &Machine{m}, rt, nil
 }
 
-// Start boots the VMM and sends InstanceStart.
+// NewMachineFromSnapshot builds a Machine that loads memPath/statePath and
+// resumes, instead of cold booting. The network device is restored from the
+// snapshot (the SDK's load-snapshot handler list skips network-interface
+// creation), so we omit NetworkInterfaces here; the caller must recreate the
+// tap under the name baked into the snapshot before Start. The rootfs drive is
+// kept only so the SDK's load-snapshot validation can stat it — its contents
+// must already match the snapshot's view of the disk.
+func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, statePath string, disableValidation bool) (*Machine, RuntimeConfig, error) {
+	opts.TapDevice = "" // device comes from the snapshot; don't add a fresh iface
+	fcCfg, err := opts.fcConfig()
+	if err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	fcCfg.DisableValidation = disableValidation
+
+	cmd := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir)
+	m, err := fcsdk.NewMachine(ctx, fcCfg,
+		fcsdk.WithProcessRunner(cmd),
+		fcsdk.WithLogger(silentLog()),
+		fcsdk.WithSnapshot(memPath, statePath, func(c *fcsdk.SnapshotConfig) {
+			c.ResumeVM = true
+		}),
+	)
+	if err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
+	return &Machine{m}, rt, nil
+}
+
+// Start boots the VMM and sends InstanceStart — or, for a snapshot-backed
+// machine, loads the snapshot and resumes (the SDK no-ops InstanceStart then).
 func Start(ctx context.Context, m *Machine) error {
 	if m == nil || m.Machine == nil {
 		return fmt.Errorf("nil machine")
@@ -205,4 +236,29 @@ func PID(m *Machine) (int, error) {
 		return 0, fmt.Errorf("nil machine")
 	}
 	return m.Machine.PID()
+}
+
+// Pause freezes the guest's vCPUs (required before CreateSnapshot).
+func Pause(ctx context.Context, m *Machine) error {
+	if m == nil || m.Machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+	return m.Machine.PauseVM(ctx)
+}
+
+// Resume unfreezes the guest's vCPUs after a snapshot.
+func Resume(ctx context.Context, m *Machine) error {
+	if m == nil || m.Machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+	return m.Machine.ResumeVM(ctx)
+}
+
+// Snapshot writes a full VM snapshot (memory + device state) to the given
+// paths. The VM must be paused first.
+func Snapshot(ctx context.Context, m *Machine, memPath, statePath string) error {
+	if m == nil || m.Machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+	return m.Machine.CreateSnapshot(ctx, memPath, statePath)
 }
