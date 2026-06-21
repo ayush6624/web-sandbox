@@ -12,6 +12,7 @@ export type {
   SandboxOpts,
   SandboxCreateOpts,
   SandboxInfo,
+  SnapshotInfo,
   CommandResult,
   CommandRunOpts,
   PortMapping,

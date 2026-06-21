@@ -43,6 +43,28 @@ export interface ApiPortMapping {
   host_port: number
 }
 
+/** Raw snapshot object as returned by the REST API (snake_case). */
+export interface ApiSnapshot {
+  id: string
+  source_id: string
+  tap_device: string
+  guest_ip: string
+  mem_path: string
+  state_path: string
+  rootfs_path: string
+  created_at: string
+}
+
+/** A saved point-in-time image of a sandbox that can be restored. */
+export interface SnapshotInfo {
+  /** Unique snapshot id (pass to {@link Sandbox.restore}). */
+  snapshotId: string
+  /** Id of the sandbox this snapshot was taken from. */
+  sourceId: string
+  /** Creation time. */
+  createdAt: Date
+}
+
 /** One forwarded port: guest port → host port. */
 export interface PortMapping {
   /** Port inside the guest. */
@@ -133,6 +155,15 @@ export interface WriteInfo {
 export interface ReadOpts {
   /** `'text'` (default) decodes the file as UTF-8; `'bytes'` returns a `Uint8Array`. */
   format?: 'text' | 'bytes'
+}
+
+/** Converts a raw API snapshot object to the public {@link SnapshotInfo} shape. */
+export function toSnapshotInfo(raw: ApiSnapshot): SnapshotInfo {
+  return {
+    snapshotId: raw.id,
+    sourceId: raw.source_id,
+    createdAt: new Date(raw.created_at),
+  }
 }
 
 /** Converts a raw API sandbox object to the public {@link SandboxInfo} shape. */

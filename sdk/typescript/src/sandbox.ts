@@ -2,14 +2,16 @@ import { ApiClient, CREATE_REQUEST_TIMEOUT_MS } from './client.js'
 import { Commands } from './commands.js'
 import { SandboxError } from './errors.js'
 import { Files } from './files.js'
-import { toSandboxInfo } from './types.js'
+import { toSandboxInfo, toSnapshotInfo } from './types.js'
 import type {
   ApiPortMapping,
   ApiSandbox,
+  ApiSnapshot,
   PortMapping,
   SandboxCreateOpts,
   SandboxInfo,
   SandboxOpts,
+  SnapshotInfo,
 } from './types.js'
 
 /** The guest port forwarded to the host at create time (the primary app port). */
@@ -105,6 +107,49 @@ export class Sandbox {
   }
 
   /**
+   * Restores a brand-new sandbox from a snapshot, resuming it from the saved
+   * memory + device state instead of cold booting. Far faster than
+   * {@link Sandbox.create} because it skips kernel boot, init, and agent
+   * startup.
+   *
+   * The source sandbox the snapshot was taken from must no longer be running:
+   * the snapshot reuses its guest IP and tap device, which would otherwise
+   * collide.
+   *
+   * @param snapshotId Id returned by {@link Sandbox#snapshot}.
+   * @param opts API overrides plus an optional `timeoutMs` auto-destroy.
+   */
+  static async restore(snapshotId: string, opts: SandboxCreateOpts = {}): Promise<Sandbox> {
+    const client = new ApiClient(opts)
+    const res = await client.request('POST', `/snapshots/${snapshotId}/restore`, {
+      timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
+      ...(opts.timeoutMs !== undefined
+        ? { json: { timeout_sec: Math.ceil(opts.timeoutMs / 1000) } }
+        : {}),
+    })
+    const raw = (await res.json()) as ApiSandbox
+    return new Sandbox(client, toSandboxInfo(raw))
+  }
+
+  /**
+   * Lists all saved snapshots on the host.
+   */
+  static async listSnapshots(opts: SandboxOpts = {}): Promise<SnapshotInfo[]> {
+    const client = new ApiClient(opts)
+    const res = await client.request('GET', '/snapshots')
+    const raw = (await res.json()) as ApiSnapshot[] | null
+    return (raw ?? []).map(toSnapshotInfo)
+  }
+
+  /**
+   * Deletes a snapshot and its on-disk artifacts.
+   */
+  static async deleteSnapshot(snapshotId: string, opts: SandboxOpts = {}): Promise<void> {
+    const client = new ApiClient(opts)
+    await client.request('DELETE', `/snapshots/${snapshotId}`)
+  }
+
+  /**
    * Returns the `host:port` to reach a service running inside the sandbox
    * from the outside, e.g. `100.99.183.74:5200`.
    *
@@ -169,6 +214,22 @@ export class Sandbox {
     })
     const raw = (await res.json()) as ApiSandbox
     this.info.expiresAt = raw.expires_at ? new Date(raw.expires_at) : undefined
+  }
+
+  /**
+   * Captures a snapshot of this sandbox (Firecracker memory + device state plus
+   * a frozen rootfs copy) that can later be restored into a new sandbox with
+   * {@link Sandbox.restore}. The sandbox is paused briefly during capture and
+   * then keeps running.
+   *
+   * @returns Metadata for the saved snapshot, including its `snapshotId`.
+   */
+  async snapshot(): Promise<SnapshotInfo> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/snapshot`, {
+      timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+    })
+    const raw = (await res.json()) as ApiSnapshot
+    return toSnapshotInfo(raw)
   }
 
   /**
