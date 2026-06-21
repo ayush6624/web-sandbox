@@ -41,6 +41,27 @@ type PortMapping struct {
 	HostPort  int `json:"host_port"`
 }
 
+// Snapshot is a saved point-in-time image of a sandbox (Firecracker memory +
+// device state plus a frozen rootfs copy) that a new sandbox can be restored
+// from. TapDevice and GuestIP are recorded because the snapshot bakes them in:
+// a restore must recreate the same tap and reuse the same guest IP.
+type Snapshot struct {
+	ID       string `json:"id"`
+	SourceID string `json:"source_id"`
+	// TapDevice and GuestIP are reused on restore (baked into the snapshot).
+	TapDevice string `json:"tap_device"`
+	GuestIP   string `json:"guest_ip"`
+	MemPath   string `json:"mem_path"`
+	StatePath string `json:"state_path"`
+	// RootfsPath is the frozen rootfs copy this snapshot restores FROM.
+	RootfsPath string `json:"rootfs_path"`
+	// SourceRootfsPath is the disk path baked into the Firecracker snapshot —
+	// a restore must place its rootfs copy here, or Firecracker can't reattach
+	// the block device.
+	SourceRootfsPath string    `json:"source_rootfs_path"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
 // Pools defines the resource ranges from which sandboxes draw on creation.
 type Pools struct {
 	TapPrefix  string // e.g. "fc"
@@ -142,8 +163,24 @@ func (r *Registry) migrate() error {
 		PRIMARY KEY (sandbox_id, guest_port)
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_extra_host_port ON sandbox_ports(host_port);
+	CREATE TABLE IF NOT EXISTS snapshots (
+		id                 TEXT PRIMARY KEY,
+		source_id          TEXT NOT NULL,
+		tap_device         TEXT NOT NULL,
+		guest_ip           TEXT NOT NULL,
+		mem_path           TEXT NOT NULL,
+		state_path         TEXT NOT NULL,
+		rootfs_path        TEXT NOT NULL,
+		source_rootfs_path TEXT NOT NULL DEFAULT '',
+		created_at         INTEGER NOT NULL
+	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
+		return err
+	}
+	// source_rootfs_path was added after the snapshots table first shipped.
+	if _, err := r.db.Exec(`ALTER TABLE snapshots ADD COLUMN source_rootfs_path TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
 	// expires_at was added after v1 databases shipped. ALTER TABLE has no
@@ -190,6 +227,57 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt))
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Sandbox{}, err
+	}
+	return Sandbox{
+		ID:         id,
+		TapDevice:  tap,
+		GuestIP:    ip,
+		HostPort:   port,
+		RootfsPath: rootfsPath,
+		Status:     StatusRunning,
+		CreatedAt:  now,
+		ExpiresAt:  expiresAt,
+	}, nil
+}
+
+// CreateRestore inserts a 'running' row for a sandbox restored from a snapshot.
+// Unlike Create, the tap and guest IP are fixed (the snapshot baked them in) —
+// only the host port is freshly allocated. The partial unique indexes still
+// guarantee the tap/IP aren't already taken by a running sandbox, so a restore
+// fails cleanly if the source (or a prior restore of the same snapshot) is
+// still live.
+func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip string, expiresAt *time.Time) (Sandbox, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	defer tx.Rollback()
+
+	used, err := loadUsed(ctx, tx)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	if used.taps[tap] {
+		return Sandbox{}, fmt.Errorf("tap %s in use (source sandbox still running?)", tap)
+	}
+	if used.ips[ip] {
+		return Sandbox{}, fmt.Errorf("guest IP %s in use (source sandbox still running?)", ip)
+	}
+	port, err := pickFreePort(used.ports, r.pools)
+	if err != nil {
+		return Sandbox{}, err
+	}
+
+	now := time.Now()
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at)
+		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?)`,
+		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt))
+	if err != nil {
+		return Sandbox{}, fmt.Errorf("insert restored sandbox: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Sandbox{}, err
@@ -339,6 +427,72 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 	_, err := r.db.ExecContext(ctx,
 		`DELETE FROM sandbox_ports WHERE sandbox_id=? AND guest_port=?`, id, guestPort)
 	return err
+}
+
+// --- snapshots ---
+
+// snapshotCols is the column list every snapshot SELECT uses, in scan order.
+const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at`
+
+// CreateSnapshot records a snapshot's metadata. The artifact files
+// (mem/state/rootfs) are written by the caller before this is called.
+func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix())
+	if err != nil {
+		return fmt.Errorf("insert snapshot: %w", err)
+	}
+	return nil
+}
+
+// GetSnapshot returns a snapshot by id.
+func (r *Registry) GetSnapshot(ctx context.Context, id string) (Snapshot, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE id=?`, id)
+	return scanSnapshot(row)
+}
+
+// ListSnapshots returns all snapshots (most recent first).
+func (r *Registry) ListSnapshots(ctx context.Context) ([]Snapshot, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Snapshot
+	for rows.Next() {
+		s, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSnapshot removes a snapshot row. The caller removes the artifact files.
+func (r *Registry) DeleteSnapshot(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM snapshots WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("snapshot %s not found", id)
+	}
+	return nil
+}
+
+func scanSnapshot(r rowScanner) (Snapshot, error) {
+	var s Snapshot
+	var createdAt int64
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt)
+	if err != nil {
+		return s, err
+	}
+	s.CreatedAt = time.Unix(createdAt, 0)
+	return s, nil
 }
 
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
