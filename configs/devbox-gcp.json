@@ -1,8 +1,9 @@
 {
   "socket_path":     "/run/sandbox.sock",
   "db_path":         "/var/lib/sandbox/registry.db",
-  "rootfs_base":     "/opt/fc/devbox-rootfs.ext4",
-  "rootfs_dir":      "/var/lib/sandbox/rootfs",
+  "rootfs_base":     "/mnt/sandbox-data/base/devbox-rootfs.ext4",
+  "rootfs_dir":      "/mnt/sandbox-data/rootfs",
+  "snapshot_dir":    "/mnt/sandbox-data/snapshots",
   "bridge":          "br-fc",
   "gateway_ip":      "172.16.0.1",
   "nameservers":     "8.8.8.8,8.8.4.4",

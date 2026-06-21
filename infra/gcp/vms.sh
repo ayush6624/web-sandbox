@@ -48,6 +48,7 @@ cmd_up() {
     --image-project="$IMAGE_PROJECT" \
     --boot-disk-size="$DISK_SIZE" \
     --boot-disk-type="$DISK_TYPE" \
+    --create-disk="device-name=sandbox-xfs,size=${DATA_DISK_SIZE},type=${DATA_DISK_TYPE},auto-delete=yes" \
     --no-service-account \
     --no-scopes \
     "${spot_args[@]}" \
