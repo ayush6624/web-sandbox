@@ -105,6 +105,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Sprintf(" (%s)", cfg.RootfsBase), nil
 	})
+	warnCheck("Reflink CoW", func() (string, error) {
+		if err := probeReflink(cfg.RootfsDir); err != nil {
+			return "", fmt.Errorf("%s can't reflink — rootfs/restore/fan-out fall back to a full copy (put it on XFS/btrfs): %v", cfg.RootfsDir, err)
+		}
+		return fmt.Sprintf(" (%s supports cp --reflink)", cfg.RootfsDir), nil
+	})
 	fmt.Println()
 
 	fmt.Println("Networking")
@@ -152,6 +158,29 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s, %s\n", green(fmt.Sprintf("%d passed", pass)), yellow(fmt.Sprintf("%d warnings", warn)))
 	} else {
 		fmt.Printf("%s\n", green(fmt.Sprintf("All %d checks passed", pass)))
+	}
+	return nil
+}
+
+// probeReflink verifies dir's filesystem supports copy-on-write clones by
+// actually attempting `cp --reflink=always` on a tiny temp file (the same
+// mechanism provisioner.CloneFile relies on) and cleaning up after itself.
+func probeReflink(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	src, err := os.CreateTemp(dir, ".reflink-probe-*")
+	if err != nil {
+		return err
+	}
+	srcPath := src.Name()
+	_, _ = src.WriteString("probe")
+	src.Close()
+	dstPath := srcPath + ".clone"
+	defer os.Remove(srcPath)
+	defer os.Remove(dstPath)
+	if out, err := exec.Command("cp", "--reflink=always", srcPath, dstPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
 	}
 	return nil
 }

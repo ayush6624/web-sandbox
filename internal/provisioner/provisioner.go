@@ -113,9 +113,8 @@ func (p *Provisioner) PrepareRootfs(sandboxID string) (string, error) {
 		return "", err
 	}
 	dest := p.rootfsPath(sandboxID)
-	cmd := exec.Command("cp", "--sparse=always", p.RootfsBase, dest)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("cp rootfs: %w: %s", err, out)
+	if err := CloneFile(p.RootfsBase, dest); err != nil {
+		return "", fmt.Errorf("clone rootfs: %w", err)
 	}
 	return dest, nil
 }
@@ -152,17 +151,45 @@ func (p *Provisioner) SnapshotPaths(snapshotID string) (mem, state, rootfs strin
 		nil
 }
 
-// CopyFileSparse copies a single file sparsely, creating the destination's
-// parent directory if needed. Used to freeze a sandbox's rootfs into a snapshot
+// CopyFileSparse copies a single file, creating the destination's parent
+// directory if needed. Used to freeze a sandbox's rootfs into a snapshot
 // directory, and to lay a snapshot's frozen rootfs back down for a restore.
+// Routes through CloneFile so it's an instant reflink CoW clone on XFS/btrfs.
 func (p *Provisioner) CopyFileSparse(src, dst string) error {
+	return CloneFile(src, dst)
+}
+
+// CloneFile copies src to dst as a copy-on-write clone when the filesystem
+// supports it: `cp --reflink=always` is instant on XFS/btrfs (src and dst share
+// extents until written), which is the single biggest win for restore/fan-out
+// latency — it removes the multi-GB rootfs copy. Falls back to a sparse copy on
+// filesystems without reflink (e.g. ext4). Creates dst's parent dir if needed.
+func CloneFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+	if out, err := exec.Command("cp", "--reflink=always", src, dst).CombinedOutput(); err == nil {
+		return nil
+	} else if !reflinkUnsupported(out) {
+		return fmt.Errorf("reflink %s -> %s: %w: %s", src, dst, err, out)
+	}
+	// Filesystem doesn't support reflink — fall back to a plain sparse copy.
 	if out, err := exec.Command("cp", "--sparse=always", src, dst).CombinedOutput(); err != nil {
 		return fmt.Errorf("cp %s -> %s: %w: %s", src, dst, err, out)
 	}
 	return nil
+}
+
+// reflinkUnsupported reports whether a failed `cp --reflink=always` failed
+// because the filesystem can't reflink (vs. a real error like ENOSPC), so we
+// know it's safe to fall back to a sparse copy. coreutils emits EOPNOTSUPP /
+// "not supported" / "Invalid cross-device link" in that case.
+func reflinkUnsupported(out []byte) bool {
+	s := strings.ToLower(string(out))
+	return strings.Contains(s, "not supported") ||
+		strings.Contains(s, "operation not supported") ||
+		strings.Contains(s, "invalid cross-device") ||
+		strings.Contains(s, "cross-device link")
 }
 
 // CleanupSnapshot removes a snapshot's artifact directory (best-effort).
