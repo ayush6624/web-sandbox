@@ -32,3 +32,22 @@ type RuntimeConfig struct {
 	SocketPath string
 	VMID       string
 }
+
+// CloneParams drives a single identity-neutral clone restored from a snapshot
+// (see StartClone). The rootfs is relocated to CloneRootfsPath, the host tap is
+// remapped to TapDevice via the snapshot-load network_overrides, and the new
+// network identity is pushed into MMDS so the in-guest thaw agent reconfigures
+// eth0 to it. Gen must differ from the source's MMDS generation so the agent
+// notices the change (we use the clone's sandbox id).
+type CloneParams struct {
+	MemPath         string
+	StatePath       string
+	CloneRootfsPath string
+	TapDevice       string
+
+	GuestIP    string // fresh IP from the pool
+	MacAddress string // fresh MAC
+	GatewayIP  string
+	Prefix     int // guest CIDR prefix length, e.g. 24
+	Gen        string
+}

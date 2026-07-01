@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -223,6 +224,175 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
 	writeJSON(w, 201, sb)
+}
+
+// clone is one in-flight fan-out clone between Phase 1 (resume) and Phase 2 (bridge).
+type clone struct {
+	sb         registry.Sandbox
+	m          *vm.Machine
+	vmID, sock string
+	err        error
+}
+
+// handleFanout restores N identity-neutral clones from one snapshot concurrently.
+// Each clone gets a fresh tap/IP/port from the pool (like a cold create) and its
+// own reflink CoW rootfs; the snapshot's baked identity is discarded. Clones come
+// up on UNBRIDGED taps and reidentify eth0 from MMDS (see vm.StartClone + the
+// sandboxd thaw agent) before any tap joins br-fc, so the baked source IP — which
+// every clone momentarily shares — never collides on the shared bridge.
+func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	snapID := r.PathValue("id")
+
+	snap, err := s.reg.GetSnapshot(ctx, snapID)
+	if err != nil {
+		httpError(w, 404, fmt.Errorf("snapshot %s not found", snapID))
+		return
+	}
+
+	var body struct {
+		Count      int `json:"count"`
+		TimeoutSec int `json:"timeout_sec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if body.Count < 1 {
+		httpError(w, 400, errors.New("count must be >= 1"))
+		return
+	}
+	if body.TimeoutSec < 0 {
+		httpError(w, 400, errors.New("timeout_sec must be >= 0"))
+		return
+	}
+	var expiresAt *time.Time
+	if body.TimeoutSec > 0 {
+		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
+		expiresAt = &t
+	}
+
+	t0 := time.Now()
+
+	// Phase 1 (parallel): bring each clone up on an UNBRIDGED tap and resume it.
+	// After resume the in-guest thaw agent reconfigures eth0 to the fresh IP/MAC
+	// off MMDS — no host contact and no bridge needed for that step.
+	clones := make([]*clone, body.Count)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8) // bound concurrent bring-up
+	for i := 0; i < body.Count; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			clones[i] = s.bringUpClone(snap, expiresAt)
+		}(i)
+	}
+	wg.Wait()
+
+	// Give guests a moment to finish reidentifying before any tap is bridged.
+	// (The thaw agent polls MMDS every ~200ms; this is a generous margin. A
+	// vsock/ARP readiness signal would make this exact — deferred to M3.)
+	time.Sleep(1500 * time.Millisecond)
+
+	// Phase 2 (parallel): bridge each live clone's tap, DNAT, wait for its agent.
+	live := make([]registry.Sandbox, 0, body.Count)
+	var mu sync.Mutex
+	for _, c := range clones {
+		if c == nil || c.err != nil {
+			continue
+		}
+		wg.Add(1)
+		go func(c *clone) {
+			defer wg.Done()
+			if err := s.finishClone(ctx, c.sb, c.m, c.vmID, c.sock); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] fanout clone finish failed: %v\n", c.sb.ID, err)
+				_ = s.destroy(context.Background(), c.sb.ID)
+				return
+			}
+			mu.Lock()
+			live = append(live, c.sb)
+			mu.Unlock()
+		}(c)
+	}
+	wg.Wait()
+
+	fmt.Fprintf(os.Stderr, "[fanout %s] %d/%d clones live in %s\n",
+		snapID, len(live), body.Count, time.Since(t0).Round(time.Millisecond))
+	if len(live) == 0 {
+		httpError(w, 500, errors.New("all clones failed to start"))
+		return
+	}
+	writeJSON(w, 201, live)
+}
+
+// bringUpClone allocates resources for one clone and resumes it on an unbridged
+// tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
+func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time) *clone {
+	id := uuid.NewString()
+	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
+	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt)
+	if err != nil {
+		return &clone{err: fmt.Errorf("registry create: %w", err)}
+	}
+	if _, err := s.cfg.Provisioner.CloneRootfs(id, snap.RootfsPath); err != nil {
+		s.rollbackPreVM(id, sb)
+		return &clone{sb: sb, err: fmt.Errorf("clone rootfs: %w", err)}
+	}
+	if err := s.cfg.Provisioner.CreateTapUnbridged(sb.TapDevice); err != nil {
+		s.rollbackPreVM(id, sb)
+		return &clone{sb: sb, err: fmt.Errorf("create tap: %w", err)}
+	}
+	opts := s.cfg.VMTemplate
+	opts.SocketPath = ""
+	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
+		MemPath:         snap.MemPath,
+		StatePath:       snap.StatePath,
+		CloneRootfsPath: rootfsPath,
+		TapDevice:       sb.TapDevice,
+		GuestIP:         sb.GuestIP,
+		MacAddress:      randomMAC(),
+		GatewayIP:       s.cfg.GatewayIP,
+		Prefix:          24,
+		Gen:             id,
+	})
+	if err != nil {
+		s.rollbackPreVM(id, sb)
+		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", err)}
+	}
+	return &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath}
+}
+
+// finishClone bridges a resumed clone's tap, sets up port forwarding, records it,
+// and waits for its agent on the (now reidentified) fresh IP.
+func (s *Server) finishClone(ctx context.Context, sb registry.Sandbox, m *vm.Machine, vmID, sock string) error {
+	pid, err := vm.PID(m)
+	if err != nil {
+		_ = vm.StopForce(m)
+		return fmt.Errorf("pid: %w", err)
+	}
+	if err := s.cfg.Provisioner.AttachTapToBridge(sb.TapDevice); err != nil {
+		_ = vm.StopForce(m)
+		return fmt.Errorf("attach tap: %w", err)
+	}
+	if err := s.cfg.Provisioner.AddPortForward(sb.HostPort, sb.GuestIP); err != nil {
+		_ = vm.StopForce(m)
+		return fmt.Errorf("port forward: %w", err)
+	}
+	if err := s.reg.FinishStart(ctx, sb.ID, pid, vmID, sock); err != nil {
+		_ = vm.StopForce(m)
+		return fmt.Errorf("finish start: %w", err)
+	}
+	s.machines.Store(sb.ID, m)
+	go func(id string) {
+		_ = vm.Wait(context.Background(), m)
+		fmt.Fprintf(os.Stderr, "[%s] clone VM exited\n", id)
+	}(sb.ID)
+	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
+		return fmt.Errorf("agent never ready on %s: %w", sb.GuestIP, err)
+	}
+	return nil
 }
 
 // handleListSnapshots returns all saved snapshots.

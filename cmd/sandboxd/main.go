@@ -41,6 +41,9 @@ func main() {
 	mux.HandleFunc("GET /dir", handleListDir)
 	mux.HandleFunc("GET /shell", handleShell)
 
+	// Reidentify eth0 from MMDS after a fan-out clone resume (no-op otherwise).
+	go runThawAgent()
+
 	log.Printf("sandboxd listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }

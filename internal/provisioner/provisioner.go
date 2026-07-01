@@ -123,6 +123,26 @@ func (p *Provisioner) rootfsPath(id string) string {
 	return filepath.Join(p.RootfsDir, id+".ext4")
 }
 
+// RootfsPathFor returns the standard per-sandbox rootfs path for an id (without
+// creating anything). Used by fan-out to record the row before laying the file.
+func (p *Provisioner) RootfsPathFor(id string) string {
+	return p.rootfsPath(id)
+}
+
+// CloneRootfs lays down a per-sandbox rootfs at the standard path by CoW-cloning
+// srcRootfs (a snapshot's frozen rootfs) via reflink. Used by fan-out; the
+// returned path is what the sandbox row records, so destroy() cleans it up.
+func (p *Provisioner) CloneRootfs(sandboxID, srcRootfs string) (string, error) {
+	if err := os.MkdirAll(p.RootfsDir, 0o755); err != nil {
+		return "", err
+	}
+	dest := p.rootfsPath(sandboxID)
+	if err := CloneFile(srcRootfs, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
 // CleanupRootfs deletes the per-sandbox rootfs file (best-effort).
 func (p *Provisioner) CleanupRootfs(sandboxID string) error {
 	return os.Remove(p.rootfsPath(sandboxID))
@@ -199,15 +219,33 @@ func (p *Provisioner) CleanupSnapshot(snapshotID string) error {
 
 // CreateTap creates a tap device and attaches it to the configured bridge.
 func (p *Provisioner) CreateTap(tap string) error {
+	if err := p.CreateTapUnbridged(tap); err != nil {
+		return err
+	}
+	return p.AttachTapToBridge(tap)
+}
+
+// CreateTapUnbridged creates an up tap device WITHOUT attaching it to the
+// bridge. Used by fan-out: a clone resumes on an unbridged tap so it can read
+// MMDS and reidentify eth0 to its fresh IP/MAC before joining the shared
+// bridge, so the source's baked IP never appears on br-fc (no collision).
+func (p *Provisioner) CreateTapUnbridged(tap string) error {
 	steps := [][]string{
 		{"ip", "tuntap", "add", "dev", tap, "mode", "tap"},
-		{"ip", "link", "set", tap, "master", p.Network.Bridge},
 		{"ip", "link", "set", tap, "up"},
 	}
 	for _, args := range steps {
 		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%v: %w: %s", args, err, out)
 		}
+	}
+	return nil
+}
+
+// AttachTapToBridge attaches an existing tap to the configured bridge.
+func (p *Provisioner) AttachTapToBridge(tap string) error {
+	if out, err := exec.Command("ip", "link", "set", tap, "master", p.Network.Bridge).CombinedOutput(); err != nil {
+		return fmt.Errorf("attach %s to %s: %w: %s", tap, p.Network.Bridge, err, out)
 	}
 	return nil
 }

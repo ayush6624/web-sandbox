@@ -21,6 +21,10 @@ func NewMachineFromSnapshot(_ context.Context, _ RunOptions, _, _ string, _ bool
 	return nil, RuntimeConfig{}, ErrLinuxOnly
 }
 
+func StartClone(_ context.Context, _ RunOptions, _ CloneParams) (*Machine, RuntimeConfig, error) {
+	return nil, RuntimeConfig{}, ErrLinuxOnly
+}
+
 func Start(_ context.Context, _ *Machine) error         { return ErrLinuxOnly }
 func StopForce(_ *Machine) error                        { return ErrLinuxOnly }
 func ShutdownGuest(_ context.Context, _ *Machine) error { return ErrLinuxOnly }

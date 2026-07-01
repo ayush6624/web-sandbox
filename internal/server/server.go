@@ -94,6 +94,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
+	mux.HandleFunc("POST /snapshots/{id}/fanout", s.handleFanout)
 	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
 
 	servers := []*http.Server{{Handler: mux}}
